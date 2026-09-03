@@ -1,0 +1,75 @@
+# Docker Compose creates one project network automatically. The service names
+# `db`, `backend`, and `frontend` become DNS hostnames on that network.
+services:
+  db:
+    image: postgres:17-alpine # PostgreSQL image used by the database container.
+    # Environment variables initialize the database on the first volume use.
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taskdb}
+      POSTGRES_USER: ${POSTGRES_USER:-taskuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskpassword}
+    # Ports map host:container, making PostgreSQL available at localhost:5432.
+    ports:
+      - "5433:5432"
+    # Volumes preserve database files after the container is removed.
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskuser} -d ${POSTGRES_DB:-taskdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Networks explicitly attaches the service to the shared application network.
+    networks:
+      - task-network
+
+  backend:
+    # Build uses backend/Dockerfile and sends only backend/ as its build context.
+    build:
+      context: ./backend
+    # Environment variables configure DB access, JWT signing, and browser CORS.
+    # Separate DB fields safely support passwords containing URL characters.
+    # `db` is the PostgreSQL service name and therefore its Docker DNS hostname.
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-taskdb}
+      DB_USER: ${POSTGRES_USER:-taskuser}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-taskpassword}
+      SECRET_KEY: ${SECRET_KEY:-development-only-change-me}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    # Ports expose FastAPI at http://localhost:8000.
+    ports:
+      - "8000:8000"
+    # depends_on waits for PostgreSQL's health check before starting FastAPI.
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - task-network
+
+  frontend:
+    build:
+      context: ./frontend
+    # This URL is compiled/read by Vite and is where the user's browser finds the API.
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    # Ports expose React's Vite server at http://localhost:5173.
+    ports:
+      - "5173:5173"
+    # depends_on controls startup order; backend readiness is still handled by the UI.
+    depends_on:
+      - backend
+    networks:
+      - task-network
+
+# Named volumes are managed by Docker. `docker compose down` keeps this data;
+# `docker compose down -v` removes it.
+volumes:
+  postgres_data:
+
+# This named bridge network lets containers reach each other by service name.
+networks:
+  task-network:
+    driver: bridge
