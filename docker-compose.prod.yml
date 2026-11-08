@@ -1,0 +1,11 @@
+services:
+  web:
+    image: ${DOCKERHUB_USERNAME}/taskmanager-frontend:${TAG:-latest}
+    ports: ["80:80"]
+    depends_on: [backend]
+    restart: unless-stopped
+  backend:
+    image: ${DOCKERHUB_USERNAME}/taskmanager-backend:${TAG:-latest}
+    env_file: /opt/app/backend.env
+    expose: ["8000"]
+    restart: unless-stopped
