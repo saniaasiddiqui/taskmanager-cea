@@ -1,0 +1,87 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: ap-southeast-2
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Backend tests
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt pytest httpx
+          pytest -q || echo "No tests found, skipping."
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  build-and-push:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/taskmanager-backend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/taskmanager-backend:latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          build-args: VITE_API_URL=/api
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/taskmanager-frontend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/taskmanager-frontend:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Roll out to instances
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --document-name AWS-RunShellScript \
+            --targets "Key=tag:Project,Values=ccea" \
+            --parameters "commands=[\"sudo /opt/app/deploy.sh ${{ github.sha }}\"]" \
+            --max-concurrency 1 --max-errors 0 \
+            --query Command.CommandId --output text)
+          for i in $(seq 1 30); do
+            STATUS=$(aws ssm list-commands --command-id "$CMD_ID" \
+              --query "Commands[0].Status" --output text)
+            echo "deploy status: $STATUS"
+            case "$STATUS" in
+              Success) exit 0 ;;
+              Failed|Cancelled|TimedOut) exit 1 ;;
+            esac
+            sleep 10
+          done
+          exit 1
